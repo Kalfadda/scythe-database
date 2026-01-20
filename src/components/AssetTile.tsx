@@ -2,6 +2,7 @@ import { useState, useEffect, memo } from 'react';
 import { clsx } from 'clsx';
 import type { Asset, AssetType } from '../types';
 import { getThumbnail } from '../services/thumbnailCache';
+import { getModelThumbnail } from '../services/modelThumbnailCache';
 
 interface AssetTileProps {
   asset: Asset;
@@ -28,12 +29,20 @@ export const AssetTile = memo(function AssetTile({ asset, selected, onClick }: A
   useEffect(() => {
     let cancelled = false;
 
-    // Only try to load thumbnails for textures and materials
     if (asset.asset_type === 'texture' || asset.asset_type === 'material') {
+      // Load texture/material thumbnails from backend
       setLoading(true);
-
-      // Use cached thumbnail fetch
       getThumbnail(asset.id)
+        .then((data) => {
+          if (!cancelled) {
+            setImgSrc(data);
+            setLoading(false);
+          }
+        });
+    } else if (asset.asset_type === 'model') {
+      // Render 3D model thumbnail in browser
+      setLoading(true);
+      getModelThumbnail(asset.id, asset.absolute_path, asset.extension)
         .then((data) => {
           if (!cancelled) {
             setImgSrc(data);
@@ -47,7 +56,7 @@ export const AssetTile = memo(function AssetTile({ asset, selected, onClick }: A
     return () => {
       cancelled = true;
     };
-  }, [asset.id, asset.asset_type]);
+  }, [asset.id, asset.asset_type, asset.absolute_path, asset.extension]);
 
   return (
     <div

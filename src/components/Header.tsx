@@ -10,7 +10,7 @@ export function Header() {
   const handleSelectProject = useCallback(async () => {
     const selected = await open({
       directory: true,
-      title: 'Select Unity Project Root',
+      title: 'Select Asset Folder',
     });
     if (selected && typeof selected === 'string') {
       await setProjectRoot(selected);
@@ -59,7 +59,7 @@ export function Header() {
       <h1>Scythe Database</h1>
 
       <button className="btn btn-secondary" onClick={handleSelectProject}>
-        {projectRoot ? 'Change Project' : 'Select Project'}
+        {projectRoot ? 'Change Folder' : 'Select Folder'}
       </button>
 
       {projectRoot && (

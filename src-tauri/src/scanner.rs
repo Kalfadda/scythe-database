@@ -14,15 +14,20 @@ impl Scanner {
         Self { ignore_patterns }
     }
 
+    #[allow(dead_code)]
     pub fn is_valid_unity_project(root: &Path) -> bool {
         root.join("Assets").is_dir() && root.join("ProjectSettings").is_dir()
     }
 
+    pub fn is_valid_folder(root: &Path) -> bool {
+        root.is_dir()
+    }
+
     #[allow(dead_code)]
     pub fn scan(&self, root: &Path, project_id: &str) -> AppResult<Vec<Asset>> {
-        if !Self::is_valid_unity_project(root) {
+        if !Self::is_valid_folder(root) {
             return Err(AppError::InvalidProject(
-                "Not a valid Unity project (missing Assets or ProjectSettings folder)".to_string(),
+                "Not a valid folder".to_string(),
             ));
         }
 
@@ -197,9 +202,9 @@ pub fn scan_files_batch(
 ) -> AppResult<usize> {
     let scanner = Scanner::new(ignore_patterns.to_vec());
 
-    if !Scanner::is_valid_unity_project(root) {
+    if !Scanner::is_valid_folder(root) {
         return Err(AppError::InvalidProject(
-            "Not a valid Unity project (missing Assets or ProjectSettings folder)".to_string(),
+            "Not a valid folder".to_string(),
         ));
     }
 

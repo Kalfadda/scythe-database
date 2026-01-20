@@ -4,7 +4,7 @@ use crate::error::AppError;
 use crate::export::{ExportResult, Exporter};
 use crate::indexer::Indexer;
 use crate::previews::{parse_material_file, parse_model_info, MaterialInfo, ModelInfo, PreviewGenerator};
-use crate::scanner::{scan_files_batch, Scanner};
+use crate::scanner::scan_files_batch;
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -38,17 +38,18 @@ pub async fn set_project_root(
 ) -> Result<Project, AppError> {
     let root = Path::new(&path);
 
-    if !Scanner::is_valid_unity_project(root) {
+    // Accept any valid folder, not just Unity projects
+    if !root.is_dir() {
         return Err(AppError::InvalidProject(
-            "Not a valid Unity project. Please select a folder containing Assets and ProjectSettings directories.".to_string(),
+            "Not a valid folder.".to_string(),
         ));
     }
 
-    // Get project name from folder
+    // Get folder name
     let name = root
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "Unknown Project".to_string());
+        .unwrap_or_else(|| "Unknown Folder".to_string());
 
     // Create or get project in database
     let project = state.db.get_or_create_project(&path, &name)?;
