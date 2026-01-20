@@ -12,25 +12,45 @@ export function AssetGrid() {
 
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const handleScroll = useCallback(() => {
+  // Check if we need to load more (content doesn't fill viewport or near bottom)
+  const checkLoadMore = useCallback(() => {
     const container = containerRef.current;
     if (!container) return;
 
     const { scrollTop, scrollHeight, clientHeight } = container;
-    // Load more when within 500px of bottom
-    if (scrollHeight - scrollTop - clientHeight < 500) {
+    // Load more if content doesn't fill container OR within 500px of bottom
+    if (scrollHeight <= clientHeight || scrollHeight - scrollTop - clientHeight < 500) {
       loadMoreAssets();
     }
   }, [loadMoreAssets]);
 
+  // Scroll listener
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    // Use passive listener for better scroll performance
-    container.addEventListener('scroll', handleScroll, { passive: true });
-    return () => container.removeEventListener('scroll', handleScroll);
-  }, [handleScroll]);
+    container.addEventListener('scroll', checkLoadMore, { passive: true });
+    return () => container.removeEventListener('scroll', checkLoadMore);
+  }, [checkLoadMore]);
+
+  // Check on resize (window maximize/restore)
+  useEffect(() => {
+    const handleResize = () => {
+      // Small delay to let layout settle
+      setTimeout(checkLoadMore, 100);
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [checkLoadMore]);
+
+  // Check after assets load (in case content doesn't fill viewport)
+  useEffect(() => {
+    if (assets.length > 0 && !isLoading) {
+      // Small delay to let DOM update
+      setTimeout(checkLoadMore, 50);
+    }
+  }, [assets.length, isLoading, checkLoadMore]);
 
   const hasMore = assets.length < totalCount;
 
