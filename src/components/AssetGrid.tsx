@@ -3,67 +3,87 @@ import { useStore } from '../state/store';
 import { AssetTile } from './AssetTile';
 
 export function AssetGrid() {
-  const { assets, totalCount, isLoading, loadMoreAssets, selectedAssetId, selectAsset } = useStore();
+  const assets = useStore((s) => s.assets);
+  const totalCount = useStore((s) => s.totalCount);
+  const isLoading = useStore((s) => s.isLoading);
+  const loadMoreAssets = useStore((s) => s.loadMoreAssets);
+  const selectedAssetId = useStore((s) => s.selectedAssetId);
+  const selectAsset = useStore((s) => s.selectAsset);
+
   const containerRef = useRef<HTMLDivElement>(null);
-  const loadingRef = useRef(false);
 
   const handleScroll = useCallback(() => {
-    if (!containerRef.current || loadingRef.current) return;
+    const container = containerRef.current;
+    if (!container) return;
 
-    const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
+    const { scrollTop, scrollHeight, clientHeight } = container;
+    // Load more when within 500px of bottom
     if (scrollHeight - scrollTop - clientHeight < 500) {
-      loadingRef.current = true;
-      loadMoreAssets().finally(() => {
-        loadingRef.current = false;
-      });
+      loadMoreAssets();
     }
   }, [loadMoreAssets]);
 
   useEffect(() => {
     const container = containerRef.current;
-    if (container) {
-      container.addEventListener('scroll', handleScroll);
-      return () => container.removeEventListener('scroll', handleScroll);
-    }
+    if (!container) return;
+
+    // Use passive listener for better scroll performance
+    container.addEventListener('scroll', handleScroll, { passive: true });
+    return () => container.removeEventListener('scroll', handleScroll);
   }, [handleScroll]);
 
-  if (assets.length === 0 && !isLoading) {
-    return (
-      <div className="grid-container">
-        <div className="empty-state">
-          <div className="icon">📁</div>
-          <p>No assets found</p>
-        </div>
-      </div>
-    );
-  }
+  const hasMore = assets.length < totalCount;
 
   return (
     <div className="grid-container" ref={containerRef}>
+      {/* Loading overlay - only show when reloading from scratch */}
       {isLoading && assets.length > 0 && (
         <div className="grid-loading-overlay">
           <div className="loading-spinner" />
         </div>
       )}
-      <div className="asset-grid">
-        {assets.map((asset) => (
-          <AssetTile
-            key={asset.id}
-            asset={asset}
-            selected={asset.id === selectedAssetId}
-            onClick={() => selectAsset(asset.id)}
-          />
-        ))}
-      </div>
-      {isLoading && assets.length === 0 && (
-        <div style={{ display: 'flex', justifyContent: 'center', padding: '20px' }}>
-          <div className="loading-spinner" />
+
+      {/* Empty state */}
+      {assets.length === 0 && !isLoading && (
+        <div className="empty-state">
+          <div className="icon">📁</div>
+          <p>No assets found</p>
         </div>
       )}
-      {assets.length > 0 && !isLoading && (
-        <div style={{ textAlign: 'center', padding: '10px', color: 'var(--text-secondary)' }}>
-          Showing {assets.length} of {totalCount} assets
+
+      {/* Initial loading */}
+      {assets.length === 0 && isLoading && (
+        <div className="empty-state">
+          <div className="loading-spinner" />
+          <p>Loading assets...</p>
         </div>
+      )}
+
+      {/* Asset grid */}
+      {assets.length > 0 && (
+        <>
+          <div className="asset-grid">
+            {assets.map((asset) => (
+              <AssetTile
+                key={asset.id}
+                asset={asset}
+                selected={asset.id === selectedAssetId}
+                onClick={() => selectAsset(asset.id)}
+              />
+            ))}
+          </div>
+
+          {/* Footer status */}
+          <div style={{ textAlign: 'center', padding: '16px', color: 'var(--text-secondary)' }}>
+            {isLoading && hasMore ? (
+              <div className="loading-spinner" style={{ margin: '0 auto' }} />
+            ) : hasMore ? (
+              <span>Showing {assets.length} of {totalCount} - scroll for more</span>
+            ) : (
+              <span>Showing all {assets.length} assets</span>
+            )}
+          </div>
+        </>
       )}
     </div>
   );

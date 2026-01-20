@@ -107,8 +107,9 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   loadMoreAssets: async () => {
-    const { page, totalCount, assets } = get();
-    if (assets.length >= totalCount) return;
+    const { page, totalCount, assets, isLoading } = get();
+    // Don't load more if already loading or if we have all assets
+    if (isLoading || assets.length >= totalCount) return;
 
     set({ page: page + 1 });
     await get().loadAssets();
