@@ -21,7 +21,6 @@ Thumbs.db
 
 # Tauri
 src-tauri/WixTools/
-src-tauri/icons/
 
 # Database
 *.db
