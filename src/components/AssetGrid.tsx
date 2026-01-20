@@ -1,6 +1,8 @@
 import { useRef, useEffect, useCallback } from 'react';
 import { useStore } from '../state/store';
 import { AssetTile } from './AssetTile';
+import { preloadThumbnails } from '../services/thumbnailCache';
+import { preloadModelThumbnails } from '../services/modelThumbnailCache';
 
 export function AssetGrid() {
   const assets = useStore((s) => s.assets);
@@ -51,6 +53,28 @@ export function AssetGrid() {
       setTimeout(checkLoadMore, 50);
     }
   }, [assets.length, isLoading, checkLoadMore]);
+
+  // Preload thumbnails for visible and upcoming assets
+  useEffect(() => {
+    if (assets.length === 0) return;
+
+    // Preload thumbnails for textures/materials
+    const textureAssets = assets
+      .filter(a => a.asset_type === 'texture' || a.asset_type === 'material')
+      .map(a => ({ id: a.id, modified_time: a.modified_time }));
+    preloadThumbnails(textureAssets);
+
+    // Preload thumbnails for models
+    const modelAssets = assets
+      .filter(a => a.asset_type === 'model')
+      .map(a => ({
+        id: a.id,
+        absolute_path: a.absolute_path,
+        extension: a.extension,
+        modified_time: a.modified_time
+      }));
+    preloadModelThumbnails(modelAssets);
+  }, [assets]);
 
   const hasMore = assets.length < totalCount;
 

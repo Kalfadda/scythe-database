@@ -30,9 +30,9 @@ export const AssetTile = memo(function AssetTile({ asset, selected, onClick }: A
     let cancelled = false;
 
     if (asset.asset_type === 'texture' || asset.asset_type === 'material') {
-      // Load texture/material thumbnails from backend
+      // Load texture/material thumbnails from backend (with persistent caching)
       setLoading(true);
-      getThumbnail(asset.id)
+      getThumbnail(asset.id, asset.modified_time)
         .then((data) => {
           if (!cancelled) {
             setImgSrc(data);
@@ -40,9 +40,9 @@ export const AssetTile = memo(function AssetTile({ asset, selected, onClick }: A
           }
         });
     } else if (asset.asset_type === 'model') {
-      // Render 3D model thumbnail in browser
+      // Render 3D model thumbnail in browser (with persistent caching)
       setLoading(true);
-      getModelThumbnail(asset.id, asset.absolute_path, asset.extension)
+      getModelThumbnail(asset.id, asset.absolute_path, asset.extension, asset.modified_time)
         .then((data) => {
           if (!cancelled) {
             setImgSrc(data);
@@ -56,7 +56,7 @@ export const AssetTile = memo(function AssetTile({ asset, selected, onClick }: A
     return () => {
       cancelled = true;
     };
-  }, [asset.id, asset.asset_type, asset.absolute_path, asset.extension]);
+  }, [asset.id, asset.asset_type, asset.absolute_path, asset.extension, asset.modified_time]);
 
   return (
     <div

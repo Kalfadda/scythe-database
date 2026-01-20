@@ -4,8 +4,66 @@ import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { convertFileSrc } from '@tauri-apps/api/core';
 
-const cache = new Map<string, string | null>();
+// L1: In-memory cache for instant retrieval within session
+const memoryCache = new Map<string, string | null>();
 const pending = new Map<string, Promise<string | null>>();
+
+// L2: IndexedDB for persistent storage across sessions
+const DB_NAME = 'ModelThumbnailCache';
+const DB_VERSION = 1;
+const STORE_NAME = 'thumbnails';
+
+let dbPromise: Promise<IDBDatabase> | null = null;
+
+function openDB(): Promise<IDBDatabase> {
+  if (dbPromise) return dbPromise;
+
+  dbPromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+
+    request.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+  });
+
+  return dbPromise;
+}
+
+async function getFromIndexedDB(key: string): Promise<string | null> {
+  try {
+    const db = await openDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const request = store.get(key);
+      request.onsuccess = () => resolve(request.result ?? null);
+      request.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function saveToIndexedDB(key: string, value: string): Promise<void> {
+  try {
+    const db = await openDB();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    store.put(value, key);
+  } catch {
+    // Silently fail - caching is optional
+  }
+}
+
+function getCacheKey(assetId: string, modifiedTime: number): string {
+  return `${assetId}_${modifiedTime}`;
+}
 
 // Shared renderer for generating thumbnails
 let renderer: THREE.WebGLRenderer | null = null;
@@ -160,38 +218,87 @@ async function renderModelToThumbnail(filePath: string, extension: string): Prom
   }
 }
 
-export async function getModelThumbnail(assetId: string, filePath: string, extension: string): Promise<string | null> {
-  // Return from cache if available
-  if (cache.has(assetId)) {
-    return cache.get(assetId) ?? null;
+export async function getModelThumbnail(
+  assetId: string,
+  filePath: string,
+  extension: string,
+  modifiedTime?: number
+): Promise<string | null> {
+  const cacheKey = modifiedTime ? getCacheKey(assetId, modifiedTime) : assetId;
+
+  // L1: Check memory cache first (instant)
+  if (memoryCache.has(cacheKey)) {
+    return memoryCache.get(cacheKey) ?? null;
   }
 
   // If already rendering, wait for that promise
-  if (pending.has(assetId)) {
-    return pending.get(assetId)!;
+  if (pending.has(cacheKey)) {
+    return pending.get(cacheKey)!;
   }
 
-  // Start render
-  const promise = renderModelToThumbnail(filePath, extension)
-    .then((result) => {
-      cache.set(assetId, result);
-      pending.delete(assetId);
-      return result;
-    })
-    .catch(() => {
-      cache.set(assetId, null);
-      pending.delete(assetId);
-      return null;
-    });
+  // Start the caching pipeline
+  const promise = (async () => {
+    // L2: Check IndexedDB (fast, persistent)
+    const cached = await getFromIndexedDB(cacheKey);
+    if (cached) {
+      memoryCache.set(cacheKey, cached);
+      return cached;
+    }
 
-  pending.set(assetId, promise);
+    // L3: Render with Three.js (slow, but only once per asset)
+    const rendered = await renderModelToThumbnail(filePath, extension);
+
+    // Store in both caches
+    memoryCache.set(cacheKey, rendered);
+    if (rendered) {
+      saveToIndexedDB(cacheKey, rendered); // Fire and forget
+    }
+
+    return rendered;
+  })();
+
+  pending.set(cacheKey, promise);
+
+  promise.finally(() => {
+    pending.delete(cacheKey);
+  });
+
   return promise;
 }
 
-export function invalidateModelThumbnail(assetId: string): void {
-  cache.delete(assetId);
+export function invalidateModelThumbnail(assetId: string, modifiedTime?: number): void {
+  const cacheKey = modifiedTime ? getCacheKey(assetId, modifiedTime) : assetId;
+  memoryCache.delete(cacheKey);
+  // Note: IndexedDB entry will be stale but ignored due to different modifiedTime key
 }
 
-export function clearModelThumbnailCache(): void {
-  cache.clear();
+export async function clearModelThumbnailCache(): Promise<void> {
+  memoryCache.clear();
+  // Also clear IndexedDB
+  try {
+    const db = await openDB();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    store.clear();
+  } catch {
+    // Silently fail
+  }
+}
+
+// Preload model thumbnails for upcoming assets
+export function preloadModelThumbnails(
+  assets: Array<{ id: string; absolute_path: string; extension: string; modified_time: number }>
+): void {
+  // Limit concurrent preloads to avoid overwhelming the system (models are heavier)
+  const BATCH_SIZE = 5;
+  const toPreload = assets.slice(0, BATCH_SIZE);
+
+  toPreload.forEach(({ id, absolute_path, extension, modified_time }) => {
+    const cacheKey = getCacheKey(id, modified_time);
+    // Only preload if not already cached or pending
+    if (!memoryCache.has(cacheKey) && !pending.has(cacheKey)) {
+      // Fire and forget - don't await
+      getModelThumbnail(id, absolute_path, extension, modified_time);
+    }
+  });
 }
