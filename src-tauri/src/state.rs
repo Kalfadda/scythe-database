@@ -11,6 +11,7 @@ pub struct AppState {
     pub settings: Arc<RwLock<Settings>>,
     pub app_handle: AppHandle,
     pub cancel_flag: Arc<AtomicBool>,
+    pub scan_running: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -33,6 +34,7 @@ impl AppState {
             settings: Arc::new(RwLock::new(settings)),
             app_handle,
             cancel_flag: Arc::new(AtomicBool::new(false)),
+            scan_running: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -58,5 +60,13 @@ impl AppState {
 
     pub fn reset_cancel(&self) {
         self.cancel_flag.store(false, Ordering::SeqCst);
+    }
+
+    pub fn set_scan_running(&self, running: bool) {
+        self.scan_running.store(running, Ordering::SeqCst);
+    }
+
+    pub fn is_scan_running(&self) -> bool {
+        self.scan_running.load(Ordering::SeqCst)
     }
 }

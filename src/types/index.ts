@@ -47,6 +47,10 @@ export interface ScanProgress {
   total: number | null;
   current_path: string;
   phase: 'counting' | 'walking' | 'indexing' | 'dependencies' | 'thumbnails' | 'complete' | 'cancelled';
+  /** Number of unchanged files skipped during re-scan */
+  skipped: number | null;
+  /** Number of new or changed files processed */
+  changed: number | null;
 }
 
 export interface ThumbnailProgress {

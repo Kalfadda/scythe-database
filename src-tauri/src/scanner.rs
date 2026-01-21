@@ -1,11 +1,23 @@
 use crate::db::Asset;
 use crate::error::{AppError, AppResult};
+use jwalk::WalkDir;
 use regex::Regex;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use walkdir::WalkDir;
+
+/// Map of relative_path -> (id, modified_time, size_bytes) for existing assets
+pub type ExistingAssetMap = HashMap<String, (String, i64, i64)>;
+
+/// Statistics about a scan operation
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScanStats {
+    pub total_files: usize,
+    pub unchanged_skipped: usize,
+    pub new_or_changed: usize,
+}
 
 pub struct Scanner {
     ignore_patterns: Vec<String>,
@@ -35,11 +47,19 @@ impl Scanner {
 
         let mut assets = Vec::new();
         let now = chrono::Utc::now().timestamp();
+        let root_path = root.to_path_buf();
+        let ignore_patterns = self.ignore_patterns.clone();
 
         for entry in WalkDir::new(root)
             .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| !self.should_ignore(e.path(), root))
+            .process_read_dir(move |_depth, _path, _state, children| {
+                // Filter out ignored directories to prevent descending into them
+                children.retain(|entry| {
+                    entry.as_ref().map_or(true, |e| {
+                        !should_ignore_path(&e.path(), &root_path, &ignore_patterns)
+                    })
+                });
+            })
         {
             let entry = match entry {
                 Ok(e) => e,
@@ -57,14 +77,14 @@ impl Scanner {
                 continue;
             }
 
-            let asset_type = classify_file(path);
+            let asset_type = classify_file(&path);
             if asset_type == "unknown" {
                 continue;
             }
 
             let relative_path = path
                 .strip_prefix(root)
-                .unwrap_or(path)
+                .unwrap_or(&path)
                 .to_string_lossy()
                 .to_string();
 
@@ -78,7 +98,7 @@ impl Scanner {
                 .map(|e| e.to_string_lossy().to_string())
                 .unwrap_or_default();
 
-            let metadata = fs::metadata(path)?;
+            let metadata = fs::metadata(&path)?;
             let size_bytes = metadata.len() as i64;
 
             let modified_time = metadata
@@ -119,21 +139,26 @@ impl Scanner {
     }
 
     fn should_ignore(&self, path: &Path, root: &Path) -> bool {
-        let relative = path.strip_prefix(root).unwrap_or(path);
-        let relative_str = relative.to_string_lossy();
-
-        for pattern in &self.ignore_patterns {
-            let pattern_normalized = pattern.trim_end_matches('/');
-            if relative_str.starts_with(pattern_normalized)
-                || relative_str.contains(&format!("/{}", pattern_normalized))
-                || relative_str.contains(&format!("\\{}", pattern_normalized))
-            {
-                return true;
-            }
-        }
-
-        false
+        should_ignore_path(path, root, &self.ignore_patterns)
     }
+}
+
+/// Standalone helper for ignore checking (usable in closures)
+fn should_ignore_path(path: &Path, root: &Path, ignore_patterns: &[String]) -> bool {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let relative_str = relative.to_string_lossy();
+
+    for pattern in ignore_patterns {
+        let pattern_normalized = pattern.trim_end_matches('/');
+        if relative_str.starts_with(pattern_normalized)
+            || relative_str.contains(&format!("/{}", pattern_normalized))
+            || relative_str.contains(&format!("\\{}", pattern_normalized))
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 pub fn classify_file(path: &Path) -> &'static str {
@@ -202,8 +227,6 @@ pub fn count_scannable_files(
     cancel_flag: Arc<AtomicBool>,
     mut progress_callback: impl FnMut(usize),
 ) -> AppResult<usize> {
-    let scanner = Scanner::new(ignore_patterns.to_vec());
-
     if !Scanner::is_valid_folder(root) {
         return Err(AppError::InvalidProject(
             "Not a valid folder".to_string(),
@@ -211,11 +234,18 @@ pub fn count_scannable_files(
     }
 
     let mut count = 0;
+    let root_path = root.to_path_buf();
+    let patterns = ignore_patterns.to_vec();
 
     for entry in WalkDir::new(root)
         .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| !scanner.should_ignore(e.path(), root))
+        .process_read_dir(move |_depth, _path, _state, children| {
+            children.retain(|entry| {
+                entry.as_ref().map_or(true, |e| {
+                    !should_ignore_path(&e.path(), &root_path, &patterns)
+                })
+            });
+        })
     {
         // Check cancellation
         if cancel_flag.load(Ordering::SeqCst) {
@@ -237,7 +267,7 @@ pub fn count_scannable_files(
             continue;
         }
 
-        let asset_type = classify_file(path);
+        let asset_type = classify_file(&path);
         if asset_type == "unknown" {
             continue;
         }
@@ -260,10 +290,9 @@ pub fn scan_files_batch(
     ignore_patterns: &[String],
     batch_size: usize,
     cancel_flag: Arc<AtomicBool>,
+    existing_assets: Option<&ExistingAssetMap>,
     mut callback: impl FnMut(Vec<Asset>, usize, &str) -> bool,  // Returns false to stop
-) -> AppResult<usize> {
-    let scanner = Scanner::new(ignore_patterns.to_vec());
-
+) -> AppResult<(usize, ScanStats)> {
     if !Scanner::is_valid_folder(root) {
         return Err(AppError::InvalidProject(
             "Not a valid folder".to_string(),
@@ -272,16 +301,24 @@ pub fn scan_files_batch(
 
     let mut batch = Vec::with_capacity(batch_size);
     let mut total_count = 0;
+    let mut stats = ScanStats::default();
     let now = chrono::Utc::now().timestamp();
+    let root_path = root.to_path_buf();
+    let patterns = ignore_patterns.to_vec();
 
     for entry in WalkDir::new(root)
         .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| !scanner.should_ignore(e.path(), root))
+        .process_read_dir(move |_depth, _path, _state, children| {
+            children.retain(|entry| {
+                entry.as_ref().map_or(true, |e| {
+                    !should_ignore_path(&e.path(), &root_path, &patterns)
+                })
+            });
+        })
     {
         // Check cancellation
         if cancel_flag.load(Ordering::SeqCst) {
-            return Ok(total_count);
+            return Ok((total_count, stats));
         }
 
         let entry = match entry {
@@ -299,28 +336,18 @@ pub fn scan_files_batch(
             continue;
         }
 
-        let asset_type = classify_file(path);
+        let asset_type = classify_file(&path);
         if asset_type == "unknown" {
             continue;
         }
 
         let relative_path = path
             .strip_prefix(root)
-            .unwrap_or(path)
+            .unwrap_or(&path)
             .to_string_lossy()
             .to_string();
 
-        let file_name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        let extension = path
-            .extension()
-            .map(|e| e.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        let metadata = match fs::metadata(path) {
+        let metadata = match fs::metadata(&path) {
             Ok(m) => m,
             Err(_) => continue,
         };
@@ -334,11 +361,43 @@ pub fn scan_files_batch(
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
+        stats.total_files += 1;
+
+        // Check if file is unchanged (same modified_time and size_bytes)
+        if let Some(existing) = existing_assets {
+            if let Some((_, existing_mtime, existing_size)) = existing.get(&relative_path) {
+                if *existing_mtime == modified_time && *existing_size == size_bytes {
+                    // File unchanged, skip indexing
+                    stats.unchanged_skipped += 1;
+                    continue;
+                }
+            }
+        }
+
+        // File is new or changed
+        stats.new_or_changed += 1;
+
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let extension = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_string())
+            .unwrap_or_default();
+
         let meta_path = PathBuf::from(format!("{}.meta", path.display()));
         let unity_guid = read_unity_guid(&meta_path);
 
+        // Reuse existing asset ID if the file existed before (but was modified)
+        let asset_id = existing_assets
+            .and_then(|m| m.get(&relative_path))
+            .map(|(id, _, _)| id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
         let asset = Asset {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: asset_id,
             project_id: project_id.to_string(),
             absolute_path: path.to_string_lossy().to_string(),
             relative_path: relative_path.clone(),
@@ -361,7 +420,7 @@ pub fn scan_files_batch(
         if batch.len() >= batch_size {
             let should_continue = callback(std::mem::take(&mut batch), total_count, &relative_path);
             if !should_continue {
-                return Ok(total_count);
+                return Ok((total_count, stats));
             }
             batch = Vec::with_capacity(batch_size);
         }
@@ -372,5 +431,5 @@ pub fn scan_files_batch(
         callback(batch, total_count, "");
     }
 
-    Ok(total_count)
+    Ok((total_count, stats))
 }

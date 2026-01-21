@@ -2,6 +2,16 @@
 
 All notable changes to Scythe Database will be documented in this file.
 
+## [1.0.1] - 2025-01-21
+
+### Added
+- **Skip unchanged files**: Re-scans now skip files that haven't changed (based on modification time and size), dramatically speeding up subsequent scans
+- **Parallel directory walking**: Replaced `walkdir` with `jwalk` for ~4x faster directory traversal on deep folder structures
+- **Scan statistics**: Progress events now include counts of skipped vs changed files
+
+### Fixed
+- **Concurrent scan bug**: Switching folders while a scan is in progress now properly cancels the previous scan before starting a new one
+
 ## [1.0.0] - 2025-01-20
 
 ### Added

@@ -765,6 +765,37 @@ impl Database {
         Ok(assets)
     }
 
+    /// Get lightweight info about existing assets for change detection during re-scan.
+    /// Returns a HashMap keyed by relative_path with (id, modified_time, size_bytes).
+    pub fn get_existing_asset_info(
+        &self,
+        project_id: &str,
+    ) -> AppResult<std::collections::HashMap<String, (String, i64, i64)>> {
+        let conn = self.pool.get()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, relative_path, modified_time, size_bytes FROM assets WHERE project_id = ?1",
+        )?;
+
+        let mut map = std::collections::HashMap::new();
+        let rows = stmt.query_map(params![project_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?, // id
+                row.get::<_, String>(1)?, // relative_path
+                row.get::<_, i64>(2)?,    // modified_time
+                row.get::<_, i64>(3)?,    // size_bytes
+            ))
+        })?;
+
+        for row in rows {
+            if let Ok((id, relative_path, modified_time, size_bytes)) = row {
+                map.insert(relative_path, (id, modified_time, size_bytes));
+            }
+        }
+
+        Ok(map)
+    }
+
     pub fn get_parseable_assets(&self, project_id: &str) -> AppResult<Vec<Asset>> {
         let conn = self.pool.get()?;
 

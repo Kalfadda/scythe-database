@@ -23,7 +23,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.24"
 uuid = { version = "1", features = ["v4", "serde"] }
-walkdir = "2"
+jwalk = "0.8"
 regex = "1"
 image = { version = "0.25", features = ["png", "jpeg", "tga", "bmp", "gif"] }
 psd = "0.3"

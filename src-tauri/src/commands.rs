@@ -4,7 +4,7 @@ use crate::error::AppError;
 use crate::export::{ExportResult, Exporter};
 use crate::indexer::Indexer;
 use crate::previews::{parse_material_file, parse_model_info, MaterialInfo, ModelInfo, PreviewGenerator};
-use crate::scanner::{count_scannable_files, scan_files_batch};
+use crate::scanner::{count_scannable_files, scan_files_batch, ScanStats};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -17,6 +17,10 @@ pub struct ScanProgress {
     pub total: Option<usize>,
     pub current_path: String,
     pub phase: String,
+    /// Number of unchanged files skipped during re-scan
+    pub skipped: Option<usize>,
+    /// Number of new or changed files processed
+    pub changed: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -101,12 +105,34 @@ pub async fn start_scan(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
+    // Cancel any existing scan and wait for it to finish
+    if state.is_scan_running() {
+        state.request_cancel();
+        // Wait for the existing scan to finish (with timeout)
+        let scan_running = Arc::clone(&state.scan_running);
+        tokio::task::spawn_blocking(move || {
+            let start = std::time::Instant::now();
+            while scan_running.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                // Timeout after 5 seconds
+                if start.elapsed().as_secs() > 5 {
+                    tracing::warn!("Timeout waiting for previous scan to cancel");
+                    break;
+                }
+            }
+        })
+        .await
+        .ok();
+    }
+
     let db = Arc::clone(&state.db);
     let settings = state.settings.read().clone();
     let cancel_flag = Arc::clone(&state.cancel_flag);
+    let scan_running = Arc::clone(&state.scan_running);
 
-    // Reset cancel flag at start
+    // Reset cancel flag and mark scan as running
     state.reset_cancel();
+    state.set_scan_running(true);
 
     let project = state
         .db
@@ -123,6 +149,22 @@ pub async fn start_scan(
         let indexer = Indexer::new(Arc::clone(&db));
         let mut last_refresh = std::time::Instant::now();
 
+        // Fetch existing assets for change detection (skip unchanged files on re-scan)
+        let existing_assets = match db.get_existing_asset_info(&project_id_clone) {
+            Ok(map) => {
+                if map.is_empty() {
+                    None
+                } else {
+                    tracing::info!("Found {} existing assets for change detection", map.len());
+                    Some(map)
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to fetch existing assets for change detection: {}", e);
+                None
+            }
+        };
+
         // Phase 0: Count files first for accurate progress
         let _ = app_handle.emit(
             "scan-progress",
@@ -131,6 +173,8 @@ pub async fn start_scan(
                 total: None,
                 current_path: "".to_string(),
                 phase: "counting".to_string(),
+                skipped: None,
+                changed: None,
             },
         );
 
@@ -147,6 +191,8 @@ pub async fn start_scan(
                         total: None,
                         current_path: "".to_string(),
                         phase: "counting".to_string(),
+                        skipped: None,
+                        changed: None,
                     },
                 );
             },
@@ -167,8 +213,11 @@ pub async fn start_scan(
                     total: None,
                     current_path: "".to_string(),
                     phase: "cancelled".to_string(),
+                    skipped: None,
+                    changed: None,
                 },
             );
+            scan_running.store(false, std::sync::atomic::Ordering::SeqCst);
             return;
         }
 
@@ -180,16 +229,20 @@ pub async fn start_scan(
                 total: Some(total_files),
                 current_path: "".to_string(),
                 phase: "indexing".to_string(),
+                skipped: None,
+                changed: None,
             },
         );
 
         let cancel_flag_scan = Arc::clone(&cancel_flag);
+        let mut final_stats = ScanStats::default();
         let total = scan_files_batch(
             Path::new(&root_path),
             &project_id_clone,
             &ignore_patterns,
             25,
             cancel_flag_scan,
+            existing_assets.as_ref(),
             |batch, count, current_path| {
                 // Index the batch
                 if let Err(e) = indexer.upsert_batch(&batch) {
@@ -203,6 +256,8 @@ pub async fn start_scan(
                         total: Some(total_files),
                         current_path: current_path.to_string(),
                         phase: "indexing".to_string(),
+                        skipped: None,
+                        changed: None,
                     },
                 );
 
@@ -217,6 +272,17 @@ pub async fn start_scan(
             },
         );
 
+        // Extract stats from scan result
+        if let Ok((_, stats)) = &total {
+            final_stats = stats.clone();
+            tracing::info!(
+                "Scan complete: {} total files, {} unchanged (skipped), {} new/changed",
+                stats.total_files,
+                stats.unchanged_skipped,
+                stats.new_or_changed
+            );
+        }
+
         // Check if cancelled during indexing
         if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
             let _ = app_handle.emit(
@@ -226,12 +292,15 @@ pub async fn start_scan(
                     total: None,
                     current_path: "".to_string(),
                     phase: "cancelled".to_string(),
+                    skipped: None,
+                    changed: None,
                 },
             );
+            scan_running.store(false, std::sync::atomic::Ordering::SeqCst);
             return;
         }
 
-        let file_count = total.unwrap_or(0) as i64;
+        let file_count = total.map(|(count, _)| count).unwrap_or(0) as i64;
 
         // Signal final asset update
         let _ = app_handle.emit("assets-updated", file_count);
@@ -244,12 +313,15 @@ pub async fn start_scan(
                 total: None,
                 current_path: "".to_string(),
                 phase: "dependencies".to_string(),
+                skipped: Some(final_stats.unchanged_skipped),
+                changed: Some(final_stats.new_or_changed),
             },
         );
 
         let dep_resolver = DependencyResolver::new(Arc::clone(&db_clone));
         let cancel_flag_deps = Arc::clone(&cancel_flag);
         let app_handle_deps = app_handle.clone();
+        let stats_for_deps = final_stats.clone();
         if let Err(e) = dep_resolver.resolve_all_for_project_with_progress(
             &project_id_clone,
             cancel_flag_deps,
@@ -261,6 +333,8 @@ pub async fn start_scan(
                         total: Some(total),
                         current_path: "".to_string(),
                         phase: "dependencies".to_string(),
+                        skipped: Some(stats_for_deps.unchanged_skipped),
+                        changed: Some(stats_for_deps.new_or_changed),
                     },
                 );
             },
@@ -277,8 +351,11 @@ pub async fn start_scan(
                     total: None,
                     current_path: "".to_string(),
                     phase: "cancelled".to_string(),
+                    skipped: Some(final_stats.unchanged_skipped),
+                    changed: Some(final_stats.new_or_changed),
                 },
             );
+            scan_running.store(false, std::sync::atomic::Ordering::SeqCst);
             return;
         }
 
@@ -292,11 +369,16 @@ pub async fn start_scan(
             "scan-progress",
             ScanProgress {
                 scanned: file_count as usize,
-                total: Some(file_count as usize),
+                total: Some(final_stats.total_files),
                 current_path: "".to_string(),
                 phase: "complete".to_string(),
+                skipped: Some(final_stats.unchanged_skipped),
+                changed: Some(final_stats.new_or_changed),
             },
         );
+
+        // Mark scan as no longer running
+        scan_running.store(false, std::sync::atomic::Ordering::SeqCst);
     });
 
     Ok(())
