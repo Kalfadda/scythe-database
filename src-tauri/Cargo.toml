@@ -1,6 +1,6 @@
 [package]
 name = "scythe-database"
-version = "0.1.0"
+version = "1.0.0"
 description = "A Unity asset database application"
 authors = ["Scythe"]
 edition = "2021"
