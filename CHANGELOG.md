@@ -2,7 +2,7 @@
 
 All notable changes to Scythe Database will be documented in this file.
 
-## [Unreleased]
+## [1.0.0] - 2025-01-20
 
 ### Added
 - **Cancellable operations**: All long-running operations (scan, dependency resolution, thumbnail generation) can now be cancelled via the Cancel button
@@ -12,6 +12,7 @@ All notable changes to Scythe Database will be documented in this file.
 - **Client-side 3D model thumbnails**: Model thumbnails (OBJ, FBX, GLTF) are now generated in the browser using Three.js
 - **Dependency resolution progress**: Shows progress during the dependency analysis phase
 - **TOO_LARGE/UNSUPPORTED markers**: Files that cannot have thumbnails are properly marked instead of repeatedly retried
+- Persistent IndexedDB thumbnail caching with preloading
 
 ### Changed
 - Scan phases are now clearly separated: counting → indexing → dependencies → complete
@@ -21,14 +22,6 @@ All notable changes to Scythe Database will be documented in this file.
 ### Fixed
 - Progress bar accuracy during long scans
 - UI responsiveness during large folder scans
-
-## [0.2.0] - 2025-01-20
-
-### Added
-- Persistent IndexedDB thumbnail caching with preloading
-- CLAUDE.md for Claude Code guidance
-
-### Fixed
 - Pagination when window is maximized
 - Scroll and pagination issues
 
