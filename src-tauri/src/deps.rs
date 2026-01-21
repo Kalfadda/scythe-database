@@ -3,6 +3,7 @@ use crate::error::AppResult;
 use regex::Regex;
 use std::collections::HashSet;
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub struct DependencyResolver {
@@ -98,10 +99,26 @@ impl DependencyResolver {
     }
 
     pub fn resolve_all_for_project(&self, project_id: &str) -> AppResult<usize> {
+        self.resolve_all_for_project_with_progress(project_id, Arc::new(AtomicBool::new(false)), |_, _| {})
+    }
+
+    pub fn resolve_all_for_project_with_progress(
+        &self,
+        project_id: &str,
+        cancel_flag: Arc<AtomicBool>,
+        mut progress_callback: impl FnMut(usize, usize),
+    ) -> AppResult<usize> {
         let assets = self.db.get_parseable_assets(project_id)?;
+        let total = assets.len();
         let mut total_deps = 0;
+        let mut processed = 0;
 
         for asset in assets {
+            // Check cancellation
+            if cancel_flag.load(Ordering::SeqCst) {
+                return Ok(total_deps);
+            }
+
             // Clear existing dependencies for this asset
             self.db.delete_dependencies_for_asset(&asset.id)?;
 
@@ -113,6 +130,10 @@ impl DependencyResolver {
             }
 
             total_deps += deps.len();
+            processed += 1;
+
+            // Report progress
+            progress_callback(processed, total);
         }
 
         Ok(total_deps)

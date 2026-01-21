@@ -25,9 +25,13 @@ const TYPE_ICONS: Record<AssetType, string> = {
 export const AssetTile = memo(function AssetTile({ asset, selected, onClick }: AssetTileProps) {
   const [imgSrc, setImgSrc] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [tooLarge, setTooLarge] = useState(false);
+  const [unsupported, setUnsupported] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
+    setTooLarge(false);
+    setUnsupported(false);
 
     if (asset.asset_type === 'texture' || asset.asset_type === 'material') {
       // Load texture/material thumbnails from backend (with persistent caching)
@@ -35,7 +39,15 @@ export const AssetTile = memo(function AssetTile({ asset, selected, onClick }: A
       getThumbnail(asset.id, asset.modified_time)
         .then((data) => {
           if (!cancelled) {
-            setImgSrc(data);
+            if (data === 'TOO_LARGE') {
+              setTooLarge(true);
+              setImgSrc(null);
+            } else if (data === 'UNSUPPORTED') {
+              setUnsupported(true);
+              setImgSrc(null);
+            } else {
+              setImgSrc(data);
+            }
             setLoading(false);
           }
         });
@@ -64,7 +76,17 @@ export const AssetTile = memo(function AssetTile({ asset, selected, onClick }: A
       onClick={onClick}
     >
       <div className="asset-thumbnail">
-        {imgSrc ? (
+        {tooLarge ? (
+          <span className="placeholder too-large" title="File exceeds 50MB">
+            <span style={{ fontSize: '20px' }}>📁</span>
+            <span style={{ fontSize: '9px', marginTop: '4px' }}>Too large</span>
+          </span>
+        ) : unsupported ? (
+          <span className="placeholder too-large" title="File format not supported or corrupted">
+            <span style={{ fontSize: '20px' }}>⚠️</span>
+            <span style={{ fontSize: '9px', marginTop: '4px' }}>Unsupported</span>
+          </span>
+        ) : imgSrc ? (
           <img
             src={imgSrc}
             alt={asset.file_name}

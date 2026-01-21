@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
-import type { Asset, AssetType, ScanProgress, Project, TypeCount, Dependency } from '../types';
+import type { Asset, AssetType, ScanProgress, ThumbnailProgress, ModelAssetInfo, Project, TypeCount, Dependency } from '../types';
+import { generateAllModelThumbnails } from '../services/modelThumbnailCache';
 
 interface AppState {
   // Project
@@ -13,7 +14,11 @@ interface AppState {
   totalCount: number;
   isLoading: boolean;
   scanProgress: ScanProgress | null;
+  thumbnailProgress: ThumbnailProgress | null;
   typeCounts: TypeCount[];
+
+  // Regeneration state
+  isRegenerating: boolean;
 
   // Filters
   searchQuery: string;
@@ -37,6 +42,10 @@ interface AppState {
   selectAsset: (id: string | null) => Promise<void>;
   startScan: () => Promise<void>;
   updateScanProgress: (progress: ScanProgress) => void;
+  regenerateDatabase: () => Promise<void>;
+  cancelRegeneration: () => Promise<void>;
+  regenerateThumbnails: () => Promise<void>;
+  updateThumbnailProgress: (progress: ThumbnailProgress) => void;
   exportFile: (id: string) => Promise<void>;
   exportBundle: (id: string) => Promise<void>;
   loadSettings: () => Promise<void>;
@@ -52,7 +61,9 @@ export const useStore = create<AppState>((set, get) => ({
   totalCount: 0,
   isLoading: false,
   scanProgress: null,
+  thumbnailProgress: null,
   typeCounts: [],
+  isRegenerating: false,
   searchQuery: '',
   selectedTypes: [],
   page: 0,
@@ -171,6 +182,92 @@ export const useStore = create<AppState>((set, get) => ({
       set({ scanProgress: null });
       get().loadAssets();
       get().loadTypeCounts();
+
+      // If this was a full regeneration, continue with thumbnail generation
+      const { isRegenerating } = get();
+      if (isRegenerating) {
+        get().regenerateThumbnails();
+      }
+    } else if (progress.phase === 'cancelled') {
+      set({ scanProgress: null, isRegenerating: false });
+      get().loadAssets();
+      get().loadTypeCounts();
+    }
+  },
+
+  regenerateDatabase: async () => {
+    const { project } = get();
+    if (!project) return;
+
+    // Set flag to trigger thumbnail generation after scan completes
+    set({ isRegenerating: true });
+    set({ scanProgress: { scanned: 0, total: null, current_path: '', phase: 'counting' } });
+    try {
+      await invoke('start_scan', { projectId: project.id });
+    } catch (error) {
+      console.error('Failed to start scan:', error);
+      set({ scanProgress: null, isRegenerating: false });
+    }
+  },
+
+  cancelRegeneration: async () => {
+    try {
+      await invoke('cancel_operation');
+    } catch (error) {
+      console.error('Failed to cancel operation:', error);
+    }
+  },
+
+  regenerateThumbnails: async () => {
+    const { project } = get();
+    if (!project) return;
+
+    set({ thumbnailProgress: { generated: 0, total: 0, phase: 'counting' } });
+    try {
+      await invoke('regenerate_thumbnails', { projectId: project.id });
+    } catch (error) {
+      console.error('Failed to regenerate thumbnails:', error);
+      set({ thumbnailProgress: null, isRegenerating: false });
+    }
+  },
+
+  updateThumbnailProgress: async (progress: ThumbnailProgress) => {
+    set({ thumbnailProgress: progress });
+
+    // Handle cancellation
+    if (progress.phase === 'cancelled') {
+      set({ thumbnailProgress: null, isRegenerating: false });
+      return;
+    }
+
+    // When backend texture generation completes, start model thumbnail generation
+    if (progress.phase === 'complete') {
+      const { project } = get();
+      if (!project) {
+        set({ thumbnailProgress: null, isRegenerating: false });
+        return;
+      }
+
+      try {
+        // Fetch model assets
+        set({ thumbnailProgress: { generated: 0, total: 0, phase: 'generating_models' } });
+        const modelAssets = await invoke<ModelAssetInfo[]>('get_model_assets_for_thumbnails', { projectId: project.id });
+
+        if (modelAssets.length === 0) {
+          set({ thumbnailProgress: null, isRegenerating: false });
+          return;
+        }
+
+        // Generate model thumbnails client-side
+        await generateAllModelThumbnails(modelAssets, (generated, total) => {
+          set({ thumbnailProgress: { generated, total, phase: 'generating_models' } });
+        });
+
+        set({ thumbnailProgress: null, isRegenerating: false });
+      } catch (error) {
+        console.error('Failed to generate model thumbnails:', error);
+        set({ thumbnailProgress: null, isRegenerating: false });
+      }
     }
   },
 

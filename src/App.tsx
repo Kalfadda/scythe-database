@@ -7,10 +7,10 @@ import { AssetGrid } from './components/AssetGrid';
 import { DetailPanel } from './components/DetailPanel';
 import { ScanStatus } from './components/ScanStatus';
 import { EmptyState } from './components/EmptyState';
-import type { ScanProgress } from './types';
+import type { ScanProgress, ThumbnailProgress } from './types';
 
 function App() {
-  const { project, loadSettings, updateScanProgress, scanProgress, selectedAssetId, refreshAssets, loadTypeCounts } = useStore();
+  const { project, loadSettings, updateScanProgress, updateThumbnailProgress, scanProgress, thumbnailProgress, selectedAssetId, refreshAssets, loadTypeCounts } = useStore();
   const refreshPending = useRef(false);
 
   useEffect(() => {
@@ -33,16 +33,37 @@ function App() {
       }
     });
 
+    // Listen for thumbnail generation progress
+    const unlistenThumbnails = listen<ThumbnailProgress>('thumbnail-progress', (event) => {
+      updateThumbnailProgress(event.payload);
+    });
+
     return () => {
       unlistenProgress.then(fn => fn());
       unlistenAssets.then(fn => fn());
+      unlistenThumbnails.then(fn => fn());
     };
-  }, [loadSettings, updateScanProgress, refreshAssets, loadTypeCounts]);
+  }, [loadSettings, updateScanProgress, updateThumbnailProgress, refreshAssets, loadTypeCounts]);
 
   return (
     <div className="app">
       <Header />
       {scanProgress && <ScanStatus progress={scanProgress} />}
+      {thumbnailProgress && (
+        <div className="scan-status">
+          <div className="loading-spinner" />
+          <div className="text">
+            {thumbnailProgress.phase === 'counting' && 'Counting assets...'}
+            {thumbnailProgress.phase === 'generating' && `Generating texture thumbnails... (${thumbnailProgress.generated}/${thumbnailProgress.total})`}
+            {thumbnailProgress.phase === 'generating_models' && `Generating model thumbnails... (${thumbnailProgress.generated}/${thumbnailProgress.total})`}
+          </div>
+          {thumbnailProgress.total > 0 && (
+            <div className="progress-bar" style={{ flex: 1, maxWidth: '200px' }}>
+              <div className="fill" style={{ width: `${Math.round((thumbnailProgress.generated / thumbnailProgress.total) * 100)}%` }} />
+            </div>
+          )}
+        </div>
+      )}
       <div className="main-content">
         {project ? (
           <>

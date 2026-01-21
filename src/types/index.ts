@@ -46,7 +46,20 @@ export interface ScanProgress {
   scanned: number;
   total: number | null;
   current_path: string;
-  phase: 'walking' | 'indexing' | 'dependencies' | 'thumbnails' | 'complete';
+  phase: 'counting' | 'walking' | 'indexing' | 'dependencies' | 'thumbnails' | 'complete' | 'cancelled';
+}
+
+export interface ThumbnailProgress {
+  generated: number;
+  total: number;
+  phase: 'counting' | 'generating' | 'generating_models' | 'complete' | 'cancelled';
+}
+
+export interface ModelAssetInfo {
+  id: string;
+  absolute_path: string;
+  extension: string;
+  modified_time: number;
 }
 
 export interface AssetFilter {

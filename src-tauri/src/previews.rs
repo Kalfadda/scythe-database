@@ -1,12 +1,13 @@
 use crate::db::{Asset, Database};
 use crate::error::AppResult;
-use image::imageops::FilterType;
-use image::{GenericImageView, RgbaImage, Rgba};
+use image::{DynamicImage, GenericImageView, RgbaImage, Rgba};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaterialInfo {
@@ -56,6 +57,17 @@ impl PreviewGenerator {
 
     fn generate_texture_thumbnail(&self, asset: &Asset) -> AppResult<Option<String>> {
         let source_path = Path::new(&asset.absolute_path);
+        let start_time = std::time::Instant::now();
+
+        // Check file size first - skip very large files (50MB+)
+        const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50MB
+        if let Ok(metadata) = fs::metadata(source_path) {
+            if metadata.len() > MAX_FILE_SIZE {
+                // Mark as too large
+                self.db.update_asset_thumbnail(&asset.id, "TOO_LARGE")?;
+                return Ok(Some("TOO_LARGE".to_string()));
+            }
+        }
 
         // Check if we support this format
         let extension = source_path
@@ -86,69 +98,81 @@ impl PreviewGenerator {
             return Ok(Some(thumb_path_str));
         }
 
-        // Load and resize image
-        let img = if is_psd {
-            // Handle PSD files - wrap in catch_unwind since psd crate can panic on some files
-            match std::fs::read(source_path) {
-                Ok(data) => {
-                    use std::panic::AssertUnwindSafe;
-                    let data_ref = &data;
-                    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                        psd::Psd::from_bytes(data_ref).ok().and_then(|psd| {
-                            let rgba = psd.rgba();
-                            let width = psd.width();
-                            let height = psd.height();
-                            image::RgbaImage::from_raw(width, height, rgba)
-                        })
-                    }));
+        // Load image with timeout protection (3 seconds max)
+        // This prevents hanging on corrupted or problematic files
+        const LOAD_TIMEOUT_SECS: u64 = 3;
 
-                    match result {
-                        Ok(Some(img)) => image::DynamicImage::ImageRgba8(img),
-                        Ok(None) => {
-                            tracing::warn!("Failed to parse PSD {}", asset.absolute_path);
-                            return Ok(None);
-                        }
-                        Err(_) => {
-                            tracing::warn!("PSD parsing panicked for {}", asset.absolute_path);
-                            return Ok(None);
-                        }
-                    }
-                }
+        let img = if is_psd {
+            // Handle PSD files with timeout
+            match load_psd_with_timeout(source_path, LOAD_TIMEOUT_SECS) {
+                Ok(img) => img,
                 Err(e) => {
-                    tracing::warn!("Failed to read PSD {}: {}", asset.absolute_path, e);
-                    return Ok(None);
+                    tracing::warn!("PSD load failed for {}: {}", asset.absolute_path, e);
+                    // Mark as unsupported so we don't retry
+                    self.db.update_asset_thumbnail(&asset.id, "UNSUPPORTED")?;
+                    return Ok(Some("UNSUPPORTED".to_string()));
                 }
             }
         } else {
-            match image::open(source_path) {
+            // Handle other image formats with timeout
+            match load_image_with_timeout(source_path, LOAD_TIMEOUT_SECS) {
                 Ok(img) => img,
                 Err(e) => {
-                    tracing::warn!("Failed to open image {}: {}", asset.absolute_path, e);
-                    return Ok(None);
+                    tracing::warn!("Image load failed for {}: {}", asset.absolute_path, e);
+                    // Mark as unsupported so we don't retry
+                    self.db.update_asset_thumbnail(&asset.id, "UNSUPPORTED")?;
+                    return Ok(Some("UNSUPPORTED".to_string()));
                 }
             }
         };
 
         let (width, height) = img.dimensions();
-        if width == 0 || height == 0 {
-            return Ok(None);
+        let load_time = start_time.elapsed();
+
+        // Log slow loads (over 1 second)
+        if load_time.as_secs() >= 1 {
+            tracing::info!(
+                "Slow image load: {}x{} in {:?} - {}",
+                width, height, load_time, asset.absolute_path
+            );
         }
 
-        // Calculate resize dimensions maintaining aspect ratio
-        let (new_width, new_height) = if width > height {
-            let h = (height as f32 * self.thumbnail_size as f32 / width as f32) as u32;
-            (self.thumbnail_size, h.max(1))
-        } else {
-            let w = (width as f32 * self.thumbnail_size as f32 / height as f32) as u32;
-            (w.max(1), self.thumbnail_size)
-        };
+        if width == 0 || height == 0 {
+            self.db.update_asset_thumbnail(&asset.id, "UNSUPPORTED")?;
+            return Ok(Some("UNSUPPORTED".to_string()));
+        }
 
-        let resized = img.resize_exact(new_width, new_height, FilterType::Triangle);
+        // Skip large images (over 2K resolution) - they take too long to resize
+        const MAX_DIMENSION: u32 = 2048;
+        const MAX_PIXELS: u64 = 4_194_304; // 2048 * 2048
+        let total_pixels = width as u64 * height as u64;
+        if width > MAX_DIMENSION || height > MAX_DIMENSION || total_pixels > MAX_PIXELS {
+            tracing::warn!(
+                "Image too large to process: {}x{} ({})",
+                width, height, asset.absolute_path
+            );
+            self.db.update_asset_thumbnail(&asset.id, "TOO_LARGE")?;
+            return Ok(Some("TOO_LARGE".to_string()));
+        }
+
+        // Use thumbnail() which is faster than resize_exact() for large images
+        // It maintains aspect ratio and uses efficient algorithms
+        let resized = img.thumbnail(self.thumbnail_size, self.thumbnail_size);
+
+        // Log slow resizes
+        let resize_time = start_time.elapsed() - load_time;
+        if resize_time.as_millis() >= 500 {
+            tracing::info!(
+                "Slow resize: {}x{} took {:?} - {}",
+                width, height, resize_time, asset.absolute_path
+            );
+        }
 
         // Save as PNG (better quality for thumbnails)
         if let Err(e) = resized.save(&thumb_path) {
             tracing::warn!("Failed to save thumbnail {}: {}", thumb_path.display(), e);
-            return Ok(None);
+            self.db.update_asset_thumbnail(&asset.id, "UNSUPPORTED")?;
+            return Ok(Some("UNSUPPORTED".to_string()));
         }
 
         let thumb_path_str = thumb_path.to_string_lossy().to_string();
@@ -546,4 +570,58 @@ fn md5_hash(input: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     input.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Load an image with a timeout to prevent hanging on problematic files
+fn load_image_with_timeout(path: &Path, timeout_secs: u64) -> Result<DynamicImage, String> {
+    let path_owned = path.to_path_buf();
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let result = image::open(&path_owned);
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+        Ok(Ok(img)) => Ok(img),
+        Ok(Err(e)) => Err(format!("Image load error: {}", e)),
+        Err(_) => Err("Image load timed out".to_string()),
+    }
+}
+
+/// Load a PSD file with timeout protection
+fn load_psd_with_timeout(path: &Path, timeout_secs: u64) -> Result<DynamicImage, String> {
+    let path_owned = path.to_path_buf();
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        use std::panic::AssertUnwindSafe;
+
+        let result = match std::fs::read(&path_owned) {
+            Ok(data) => {
+                let data_ref = &data;
+                let psd_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    psd::Psd::from_bytes(data_ref).ok().and_then(|psd| {
+                        let rgba = psd.rgba();
+                        let width = psd.width();
+                        let height = psd.height();
+                        image::RgbaImage::from_raw(width, height, rgba)
+                    })
+                }));
+
+                match psd_result {
+                    Ok(Some(img)) => Ok(DynamicImage::ImageRgba8(img)),
+                    Ok(None) => Err("Failed to parse PSD".to_string()),
+                    Err(_) => Err("PSD parsing panicked".to_string()),
+                }
+            }
+            Err(e) => Err(format!("Failed to read file: {}", e)),
+        };
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+        Ok(result) => result,
+        Err(_) => Err("PSD load timed out".to_string()),
+    }
 }

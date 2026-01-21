@@ -4,7 +4,7 @@ use crate::error::AppError;
 use crate::export::{ExportResult, Exporter};
 use crate::indexer::Indexer;
 use crate::previews::{parse_material_file, parse_model_info, MaterialInfo, ModelInfo, PreviewGenerator};
-use crate::scanner::scan_files_batch;
+use crate::scanner::{count_scannable_files, scan_files_batch};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -103,7 +103,10 @@ pub async fn start_scan(
 ) -> Result<(), AppError> {
     let db = Arc::clone(&state.db);
     let settings = state.settings.read().clone();
-    let thumb_dir = state.thumbnail_dir()?;
+    let cancel_flag = Arc::clone(&state.cancel_flag);
+
+    // Reset cancel flag at start
+    state.reset_cancel();
 
     let project = state
         .db
@@ -120,22 +123,73 @@ pub async fn start_scan(
         let indexer = Indexer::new(Arc::clone(&db));
         let mut last_refresh = std::time::Instant::now();
 
-        // Phase 1: Scan and index files - use smaller batches for faster feedback
+        // Phase 0: Count files first for accurate progress
         let _ = app_handle.emit(
             "scan-progress",
             ScanProgress {
                 scanned: 0,
                 total: None,
                 current_path: "".to_string(),
+                phase: "counting".to_string(),
+            },
+        );
+
+        let cancel_flag_count = Arc::clone(&cancel_flag);
+        let total_files = match count_scannable_files(
+            Path::new(&root_path),
+            &ignore_patterns,
+            cancel_flag_count,
+            |count| {
+                let _ = app_handle.emit(
+                    "scan-progress",
+                    ScanProgress {
+                        scanned: count,
+                        total: None,
+                        current_path: "".to_string(),
+                        phase: "counting".to_string(),
+                    },
+                );
+            },
+        ) {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::error!("Failed to count files: {}", e);
+                0
+            }
+        };
+
+        // Check if cancelled during counting
+        if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = app_handle.emit(
+                "scan-progress",
+                ScanProgress {
+                    scanned: 0,
+                    total: None,
+                    current_path: "".to_string(),
+                    phase: "cancelled".to_string(),
+                },
+            );
+            return;
+        }
+
+        // Phase 1: Scan and index files
+        let _ = app_handle.emit(
+            "scan-progress",
+            ScanProgress {
+                scanned: 0,
+                total: Some(total_files),
+                current_path: "".to_string(),
                 phase: "indexing".to_string(),
             },
         );
 
+        let cancel_flag_scan = Arc::clone(&cancel_flag);
         let total = scan_files_batch(
             Path::new(&root_path),
             &project_id_clone,
             &ignore_patterns,
-            25, // Smaller batches = faster visual updates
+            25,
+            cancel_flag_scan,
             |batch, count, current_path| {
                 // Index the batch
                 if let Err(e) = indexer.upsert_batch(&batch) {
@@ -146,7 +200,7 @@ pub async fn start_scan(
                     "scan-progress",
                     ScanProgress {
                         scanned: count,
-                        total: None,
+                        total: Some(total_files),
                         current_path: current_path.to_string(),
                         phase: "indexing".to_string(),
                     },
@@ -157,54 +211,83 @@ pub async fn start_scan(
                     let _ = app_handle.emit("assets-updated", count);
                     last_refresh = std::time::Instant::now();
                 }
+
+                // Return true to continue, false to stop
+                !cancel_flag.load(std::sync::atomic::Ordering::SeqCst)
             },
         );
+
+        // Check if cancelled during indexing
+        if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = app_handle.emit(
+                "scan-progress",
+                ScanProgress {
+                    scanned: 0,
+                    total: None,
+                    current_path: "".to_string(),
+                    phase: "cancelled".to_string(),
+                },
+            );
+            return;
+        }
 
         let file_count = total.unwrap_or(0) as i64;
 
         // Signal final asset update
         let _ = app_handle.emit("assets-updated", file_count);
 
-        // Phase 2: Resolve dependencies (quick pass)
+        // Phase 2: Resolve dependencies with progress
         let _ = app_handle.emit(
             "scan-progress",
             ScanProgress {
-                scanned: file_count as usize,
-                total: Some(file_count as usize),
+                scanned: 0,
+                total: None,
                 current_path: "".to_string(),
                 phase: "dependencies".to_string(),
             },
         );
 
         let dep_resolver = DependencyResolver::new(Arc::clone(&db_clone));
-        if let Err(e) = dep_resolver.resolve_all_for_project(&project_id_clone) {
+        let cancel_flag_deps = Arc::clone(&cancel_flag);
+        let app_handle_deps = app_handle.clone();
+        if let Err(e) = dep_resolver.resolve_all_for_project_with_progress(
+            &project_id_clone,
+            cancel_flag_deps,
+            |processed, total| {
+                let _ = app_handle_deps.emit(
+                    "scan-progress",
+                    ScanProgress {
+                        scanned: processed,
+                        total: Some(total),
+                        current_path: "".to_string(),
+                        phase: "dependencies".to_string(),
+                    },
+                );
+            },
+        ) {
             tracing::error!("Failed to resolve dependencies: {}", e);
         }
 
-        // Phase 3: Generate thumbnails in background - don't block completion
-        let _ = app_handle.emit(
-            "scan-progress",
-            ScanProgress {
-                scanned: file_count as usize,
-                total: Some(file_count as usize),
-                current_path: "".to_string(),
-                phase: "thumbnails".to_string(),
-            },
-        );
-
-        let preview_gen = PreviewGenerator::new(Arc::clone(&db_clone), thumb_dir.clone(), 128);
-        // Only generate first batch of thumbnails synchronously
-        if let Err(e) = preview_gen.generate_thumbnails_for_project(&project_id_clone, 50) {
-            tracing::error!("Failed to generate thumbnails: {}", e);
+        // Check if cancelled during dependencies
+        if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = app_handle.emit(
+                "scan-progress",
+                ScanProgress {
+                    scanned: 0,
+                    total: None,
+                    current_path: "".to_string(),
+                    phase: "cancelled".to_string(),
+                },
+            );
+            return;
         }
-        let _ = app_handle.emit("assets-updated", file_count);
 
         // Update project scan time
         if let Err(e) = db_clone.update_project_scan_time(&project_id_clone, file_count) {
             tracing::error!("Failed to update project scan time: {}", e);
         }
 
-        // Complete - mark done, continue thumbnails in background
+        // Complete scan phase - thumbnails will be generated separately via regenerate_thumbnails
         let _ = app_handle.emit(
             "scan-progress",
             ScanProgress {
@@ -214,26 +297,14 @@ pub async fn start_scan(
                 phase: "complete".to_string(),
             },
         );
-
-        // Continue generating remaining thumbnails after "complete"
-        let app_handle_bg = app_handle.clone();
-        std::thread::spawn(move || {
-            let preview_gen = PreviewGenerator::new(db_clone, thumb_dir, 128);
-            loop {
-                match preview_gen.generate_thumbnails_for_project(&project_id_clone, 20) {
-                    Ok(0) => break, // No more thumbnails to generate
-                    Ok(_) => {
-                        let _ = app_handle_bg.emit("assets-updated", 0);
-                    }
-                    Err(e) => {
-                        tracing::error!("Background thumbnail error: {}", e);
-                        break;
-                    }
-                }
-            }
-        });
     });
 
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cancel_operation(state: State<'_, AppState>) -> Result<(), AppError> {
+    state.request_cancel();
     Ok(())
 }
 
@@ -452,6 +523,14 @@ pub async fn get_thumbnail_base64(
 
     // First try thumbnail path
     if let Some(thumb_path) = &asset.thumbnail_path {
+        // Check for special markers
+        if thumb_path == "TOO_LARGE" {
+            return Ok(Some("TOO_LARGE".to_string()));
+        }
+        if thumb_path == "UNSUPPORTED" {
+            return Ok(Some("UNSUPPORTED".to_string()));
+        }
+
         if let Ok(data) = std::fs::read(thumb_path) {
             let base64 = base64_encode(&data);
             let ext = Path::new(thumb_path)
@@ -524,4 +603,153 @@ pub async fn get_thumbnail_base64(
 fn base64_encode(data: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThumbnailProgress {
+    pub generated: usize,
+    pub total: usize,
+    pub phase: String, // "counting", "generating", "complete"
+}
+
+#[tauri::command]
+pub async fn regenerate_thumbnails(
+    project_id: String,
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    let db = Arc::clone(&state.db);
+    let thumb_dir = state.thumbnail_dir()?;
+    let cancel_flag = Arc::clone(&state.cancel_flag);
+
+    // Spawn thumbnail generation task
+    tokio::task::spawn_blocking(move || {
+        // Phase 1: Clear existing thumbnails and count assets
+        let _ = app_handle.emit(
+            "thumbnail-progress",
+            ThumbnailProgress {
+                generated: 0,
+                total: 0,
+                phase: "counting".to_string(),
+            },
+        );
+
+        // Check cancellation
+        if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = app_handle.emit(
+                "thumbnail-progress",
+                ThumbnailProgress {
+                    generated: 0,
+                    total: 0,
+                    phase: "cancelled".to_string(),
+                },
+            );
+            return;
+        }
+
+        // Clear existing thumbnail paths to force regeneration
+        if let Err(e) = db.clear_thumbnail_paths(&project_id) {
+            tracing::error!("Failed to clear thumbnail paths: {}", e);
+        }
+
+        // Get count of texture and material assets
+        let total = match db.count_thumbnail_assets(&project_id) {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::error!("Failed to count assets: {}", e);
+                return;
+            }
+        };
+
+        if total == 0 {
+            let _ = app_handle.emit(
+                "thumbnail-progress",
+                ThumbnailProgress {
+                    generated: 0,
+                    total: 0,
+                    phase: "complete".to_string(),
+                },
+            );
+            return;
+        }
+
+        // Phase 2: Generate thumbnails in batches
+        let preview_gen = PreviewGenerator::new(Arc::clone(&db), thumb_dir, 128);
+        let mut generated = 0usize;
+        let batch_size = 25;
+
+        loop {
+            // Check cancellation
+            if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = app_handle.emit(
+                    "thumbnail-progress",
+                    ThumbnailProgress {
+                        generated,
+                        total,
+                        phase: "cancelled".to_string(),
+                    },
+                );
+                return;
+            }
+
+            let _ = app_handle.emit(
+                "thumbnail-progress",
+                ThumbnailProgress {
+                    generated,
+                    total,
+                    phase: "generating".to_string(),
+                },
+            );
+
+            match preview_gen.generate_thumbnails_for_project(&project_id, batch_size) {
+                Ok(0) => break, // No more thumbnails to generate
+                Ok(count) => {
+                    generated += count;
+                    let _ = app_handle.emit("assets-updated", 0);
+                }
+                Err(e) => {
+                    tracing::error!("Thumbnail generation error: {}", e);
+                    break;
+                }
+            }
+        }
+
+        // Phase 3: Complete
+        let _ = app_handle.emit(
+            "thumbnail-progress",
+            ThumbnailProgress {
+                generated,
+                total,
+                phase: "complete".to_string(),
+            },
+        );
+    });
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelAssetInfo {
+    pub id: String,
+    pub absolute_path: String,
+    pub extension: String,
+    pub modified_time: i64,
+}
+
+#[tauri::command]
+pub async fn get_model_assets_for_thumbnails(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ModelAssetInfo>, AppError> {
+    let assets = state.db.get_model_assets(&project_id)?;
+
+    Ok(assets
+        .into_iter()
+        .map(|a| ModelAssetInfo {
+            id: a.id,
+            absolute_path: a.absolute_path,
+            extension: a.extension,
+            modified_time: a.modified_time,
+        })
+        .collect())
 }

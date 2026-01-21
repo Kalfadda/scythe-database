@@ -10,11 +10,13 @@ export function ScanStatus({ progress }: ScanStatusProps) {
     : 0;
 
   const phaseLabels: Record<ScanProgress['phase'], string> = {
+    counting: 'Counting files...',
     walking: 'Discovering files...',
     indexing: 'Indexing assets...',
     dependencies: 'Resolving dependencies...',
     thumbnails: 'Generating thumbnails...',
     complete: 'Complete',
+    cancelled: 'Cancelled',
   };
 
   return (

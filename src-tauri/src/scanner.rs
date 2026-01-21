@@ -3,6 +3,8 @@ use crate::error::{AppError, AppResult};
 use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use walkdir::WalkDir;
 
 pub struct Scanner {
@@ -193,12 +195,72 @@ fn read_unity_guid(meta_path: &Path) -> Option<String> {
         .map(|m| m.as_str().to_string())
 }
 
+/// Count files that would be scanned (quick pre-count for progress)
+pub fn count_scannable_files(
+    root: &Path,
+    ignore_patterns: &[String],
+    cancel_flag: Arc<AtomicBool>,
+    mut progress_callback: impl FnMut(usize),
+) -> AppResult<usize> {
+    let scanner = Scanner::new(ignore_patterns.to_vec());
+
+    if !Scanner::is_valid_folder(root) {
+        return Err(AppError::InvalidProject(
+            "Not a valid folder".to_string(),
+        ));
+    }
+
+    let mut count = 0;
+
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| !scanner.should_ignore(e.path(), root))
+    {
+        // Check cancellation
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Ok(count);
+        }
+
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+
+        if path.extension().map(|e| e == "meta").unwrap_or(false) {
+            continue;
+        }
+
+        let asset_type = classify_file(path);
+        if asset_type == "unknown" {
+            continue;
+        }
+
+        count += 1;
+
+        // Report progress every 100 files
+        if count % 100 == 0 {
+            progress_callback(count);
+        }
+    }
+
+    progress_callback(count);
+    Ok(count)
+}
+
 pub fn scan_files_batch(
     root: &Path,
     project_id: &str,
     ignore_patterns: &[String],
     batch_size: usize,
-    mut callback: impl FnMut(Vec<Asset>, usize, &str),
+    cancel_flag: Arc<AtomicBool>,
+    mut callback: impl FnMut(Vec<Asset>, usize, &str) -> bool,  // Returns false to stop
 ) -> AppResult<usize> {
     let scanner = Scanner::new(ignore_patterns.to_vec());
 
@@ -217,6 +279,11 @@ pub fn scan_files_batch(
         .into_iter()
         .filter_entry(|e| !scanner.should_ignore(e.path(), root))
     {
+        // Check cancellation
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Ok(total_count);
+        }
+
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
@@ -292,7 +359,10 @@ pub fn scan_files_batch(
         total_count += 1;
 
         if batch.len() >= batch_size {
-            callback(std::mem::take(&mut batch), total_count, &relative_path);
+            let should_continue = callback(std::mem::take(&mut batch), total_count, &relative_path);
+            if !should_continue {
+                return Ok(total_count);
+            }
             batch = Vec::with_capacity(batch_size);
         }
     }

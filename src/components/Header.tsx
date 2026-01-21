@@ -3,7 +3,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { useStore } from '../state/store';
 
 export function Header() {
-  const { projectRoot, outputFolder, setProjectRoot, setOutputFolder, searchQuery, search, startScan, project } = useStore();
+  const { projectRoot, outputFolder, setProjectRoot, setOutputFolder, searchQuery, search, regenerateDatabase, cancelRegeneration, project, isRegenerating, scanProgress, thumbnailProgress } = useStore();
   const [localSearch, setLocalSearch] = useState(searchQuery);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
@@ -48,11 +48,15 @@ export function Header() {
     setLocalSearch(e.target.value);
   }, []);
 
-  const handleRefresh = useCallback(() => {
-    if (project) {
-      startScan();
+  const isWorking = isRegenerating || !!scanProgress || !!thumbnailProgress;
+
+  const handleButtonClick = useCallback(() => {
+    if (isWorking) {
+      cancelRegeneration();
+    } else if (project) {
+      regenerateDatabase();
     }
-  }, [project, startScan]);
+  }, [project, isWorking, regenerateDatabase, cancelRegeneration]);
 
   return (
     <header className="header">
@@ -78,8 +82,12 @@ export function Header() {
             onChange={handleSearch}
           />
 
-          <button className="btn btn-secondary" onClick={handleRefresh}>
-            Refresh
+          <button
+            className={`btn ${isWorking ? 'btn-danger' : 'btn-secondary'}`}
+            onClick={handleButtonClick}
+            title={isWorking ? 'Cancel current operation' : 'Re-scan files and regenerate all thumbnails'}
+          >
+            {isWorking ? 'Cancel' : 'Regenerate'}
           </button>
         </>
       )}

@@ -703,6 +703,68 @@ impl Database {
         Ok(assets)
     }
 
+    pub fn count_thumbnail_assets(&self, project_id: &str) -> AppResult<usize> {
+        let conn = self.pool.get()?;
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM assets WHERE project_id = ?1 AND asset_type IN ('texture', 'material')",
+            params![project_id],
+            |row| row.get(0),
+        )?;
+
+        Ok(count as usize)
+    }
+
+    pub fn clear_thumbnail_paths(&self, project_id: &str) -> AppResult<usize> {
+        let conn = self.pool.get()?;
+
+        let updated = conn.execute(
+            "UPDATE assets SET thumbnail_path = NULL WHERE project_id = ?1 AND asset_type IN ('texture', 'material')",
+            params![project_id],
+        )?;
+
+        Ok(updated)
+    }
+
+    pub fn get_model_assets(&self, project_id: &str) -> AppResult<Vec<Asset>> {
+        let conn = self.pool.get()?;
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, project_id, absolute_path, relative_path, file_name, extension,
+                   asset_type, size_bytes, modified_time, content_hash, unity_guid,
+                   import_type, thumbnail_path, created_at, updated_at
+            FROM assets
+            WHERE project_id = ?1 AND asset_type = 'model'
+            "#,
+        )?;
+
+        let assets: Vec<Asset> = stmt
+            .query_map(params![project_id], |row| {
+                Ok(Asset {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    absolute_path: row.get(2)?,
+                    relative_path: row.get(3)?,
+                    file_name: row.get(4)?,
+                    extension: row.get(5)?,
+                    asset_type: row.get(6)?,
+                    size_bytes: row.get(7)?,
+                    modified_time: row.get(8)?,
+                    content_hash: row.get(9)?,
+                    unity_guid: row.get(10)?,
+                    import_type: row.get(11)?,
+                    thumbnail_path: row.get(12)?,
+                    created_at: row.get(13)?,
+                    updated_at: row.get(14)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(assets)
+    }
+
     pub fn get_parseable_assets(&self, project_id: &str) -> AppResult<Vec<Asset>> {
         let conn = self.pool.get()?;
 

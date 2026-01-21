@@ -44,6 +44,9 @@ pub fn run() {
             commands::get_model_info,
             commands::get_bundle_preview,
             commands::get_thumbnail_base64,
+            commands::regenerate_thumbnails,
+            commands::get_model_assets_for_thumbnails,
+            commands::cancel_operation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -302,3 +302,33 @@ export function preloadModelThumbnails(
     }
   });
 }
+
+// Generate all model thumbnails with progress reporting
+export async function generateAllModelThumbnails(
+  assets: Array<{ id: string; absolute_path: string; extension: string; modified_time: number }>,
+  onProgress: (generated: number, total: number) => void
+): Promise<void> {
+  const total = assets.length;
+  let generated = 0;
+
+  // Clear IndexedDB cache first to force regeneration
+  await clearModelThumbnailCache();
+
+  for (const asset of assets) {
+    try {
+      // Force render (cache was cleared)
+      await renderModelToThumbnail(asset.absolute_path, asset.extension).then((result) => {
+        if (result) {
+          const cacheKey = getCacheKey(asset.id, asset.modified_time);
+          memoryCache.set(cacheKey, result);
+          saveToIndexedDB(cacheKey, result);
+        }
+      });
+    } catch (e) {
+      console.error(`Failed to generate thumbnail for ${asset.id}:`, e);
+    }
+
+    generated++;
+    onProgress(generated, total);
+  }
+}
