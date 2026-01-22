@@ -2,6 +2,12 @@
 
 A lightweight, local-first asset database browser. No cloud. No subscriptions. Just your assets, indexed and searchable.
 
+## Screenshots
+
+![Asset Browser](Screen1.png)
+
+![Asset Details](Screen2.png)
+
 ## The Problem
 
 Asset libraries grow. Fast. Before you know it, you're staring at 50,000+ files across hundreds of folders, hunting for that one texture you know exists *somewhere*. Explorer search is slow. Asset store solutions want your money and your data. You just want to find your files.
